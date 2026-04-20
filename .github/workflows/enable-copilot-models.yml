@@ -1,0 +1,133 @@
+name: Enable Premium Copilot Models
+
+# This workflow enables the Copilot CLI policy and premium model policies
+# for the organization, fixing the "Blocked / Disabled" error shown in Copilot CLI.
+#
+# Prerequisites:
+#   - Create a repository secret named COPILOT_ADMIN_TOKEN containing a
+#     fine-grained PAT (or classic PAT) with the following scopes:
+#       Fine-grained PAT:  "Copilot" → Read and Write  (manage_billing:copilot)
+#       Classic PAT:       manage_billing:copilot
+#   - The token owner must be an organization owner of monadeltaprod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Organization name"
+        required: true
+        default: "monadeltaprod"
+
+jobs:
+  enable-premium-models:
+    name: Enable premium Copilot models
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ── 1. Show current state ──────────────────────────────────────────────
+      - name: Get current Copilot billing settings
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ADMIN_TOKEN }}
+        run: |
+          echo "## Current Copilot Billing Settings" >> "$GITHUB_STEP_SUMMARY"
+          gh api /orgs/${{ inputs.org }}/copilot/billing \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            | tee /tmp/current_settings.json
+          printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/current_settings.json >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 2. Enable Copilot in the CLI ──────────────────────────────────────
+      - name: Enable Copilot CLI policy
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ADMIN_TOKEN }}
+        run: |
+          CLI_STATUS=$(jq -r '.cli // "unconfigured"' /tmp/current_settings.json)
+          echo "Current CLI status: $CLI_STATUS"
+          if [ "$CLI_STATUS" != "enabled" ]; then
+            echo "Attempting to enable Copilot CLI..."
+            gh api --method PATCH \
+              /orgs/${{ inputs.org }}/copilot/billing \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -f cli=enabled \
+              && echo "✅ Copilot CLI enabled via API" \
+              || echo "⚠️  CLI could not be set via API — see manual steps below"
+          else
+            echo "✅ Copilot CLI is already enabled"
+          fi
+
+      # ── 3. Enable premium models ───────────────────────────────────────────
+      - name: Enable premium model policies
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ADMIN_TOKEN }}
+        run: |
+          set +e   # allow individual failures without aborting the step
+          MODELS=(
+            "gpt-5.4"
+            "gpt-5.1"
+            "claude-sonnet-4.6"
+            "claude-sonnet-4.5"
+            "claude-opus-4.7"
+            "claude-opus-4.6"
+            "claude-opus-4.6-fast"
+            "claude-opus-4.5"
+          )
+
+          echo "## Model Enablement Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Model | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+
+          for model in "${MODELS[@]}"; do
+            echo "Enabling model: $model"
+            # Try the Copilot policies model endpoint (may be in preview)
+            RESULT=$(gh api --method PUT \
+              /orgs/${{ inputs.org }}/copilot/policies/models/"$model" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -f state=enabled 2>&1)
+            if [ $? -eq 0 ]; then
+              echo "✅ $model enabled"
+              echo "| $model | ✅ Enabled |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "⚠️  $model: $RESULT"
+              echo "| $model | ⚠️ Requires manual step (see below) |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          set -e
+
+      # ── 4. Print manual fallback instructions ─────────────────────────────
+      - name: Print manual configuration instructions
+        run: |
+          ORG="${{ inputs.org }}"
+          {
+            echo ""
+            echo "## Manual Configuration Steps"
+            echo ""
+            echo "If any model shows '⚠️ Requires manual step' above, complete these steps as an organization owner:"
+            echo ""
+            echo "### 1. Enable Copilot in the CLI"
+            echo ""
+            echo "Navigate to:  https://github.com/organizations/${ORG}/settings/copilot/policies"
+            echo ""
+            echo "- Find **Copilot in the CLI** and set it to **Enabled**."
+            echo ""
+            echo "### 2. Enable premium models"
+            echo ""
+            echo "Navigate to:  https://github.com/organizations/${ORG}/settings/copilot/models"
+            echo ""
+            echo "Enable each of the following models:"
+            echo "- **GPT-5.4** (1×)"
+            echo "- **GPT-5.1** (1×)"
+            echo "- **Claude Sonnet 4.6** (1×)"
+            echo "- **Claude Sonnet 4.5** (1×)"
+            echo "- **Claude Opus 4.7** (7.5×)"
+            echo "- **Claude Opus 4.6** (3×)"
+            echo "- **Claude Opus 4.6-fast** (30×)"
+            echo "- **Claude Opus 4.5** (3×)"
+            echo ""
+            echo "After saving, users in the organization will see these models as **Available** in Copilot CLI."
+          } >> "$GITHUB_STEP_SUMMARY"
