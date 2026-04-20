@@ -1,0 +1,132 @@
+name: Enable Premium Copilot Models (Enterprise)
+
+# This workflow enables the Copilot CLI policy and premium model policies
+# at the ENTERPRISE level for monadelta1, which overrides all org-level settings.
+#
+# Prerequisites:
+#   - Create a repository secret named COPILOT_ENTERPRISE_TOKEN containing a
+#     classic PAT with the following scope:
+#       manage_billing:copilot
+#   - The token owner must be an ENTERPRISE OWNER of monadelta1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      enterprise:
+        description: "Enterprise slug"
+        required: true
+        default: "monadelta1"
+
+jobs:
+  enable-enterprise-models:
+    name: Enable premium Copilot models at enterprise level
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ── 1. Show current state ──────────────────────────────────────────────
+      - name: Get current enterprise Copilot billing settings
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ENTERPRISE_TOKEN }}
+        run: |
+          echo "## Current Enterprise Copilot Billing Settings" >> "$GITHUB_STEP_SUMMARY"
+          gh api /enterprises/${{ inputs.enterprise }}/copilot/billing \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            | tee /tmp/enterprise_settings.json
+          printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/enterprise_settings.json >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 2. Enable Copilot in the CLI at enterprise level ───────────────────
+      - name: Enable Copilot CLI policy (enterprise)
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ENTERPRISE_TOKEN }}
+        run: |
+          CLI_STATUS=$(jq -r '.cli // "unconfigured"' /tmp/enterprise_settings.json)
+          echo "Current enterprise CLI status: $CLI_STATUS"
+          if [ "$CLI_STATUS" != "enabled" ]; then
+            echo "Attempting to enable Copilot CLI at enterprise level..."
+            gh api --method PATCH \
+              /enterprises/${{ inputs.enterprise }}/copilot/billing \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -f cli=enabled \
+              && echo "✅ Copilot CLI enabled via API (enterprise)" \
+              || echo "⚠️  CLI could not be set via API — see manual steps below"
+          else
+            echo "✅ Copilot CLI is already enabled at enterprise level"
+          fi
+
+      # ── 3. Enable premium models at enterprise level ───────────────────────
+      - name: Enable premium model policies (enterprise)
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ENTERPRISE_TOKEN }}
+        run: |
+          set +e   # allow individual failures without aborting the step
+          MODELS=(
+            "gpt-5.4"
+            "gpt-5.1"
+            "claude-sonnet-4.6"
+            "claude-sonnet-4.5"
+            "claude-opus-4.7"
+            "claude-opus-4.6"
+            "claude-opus-4.6-fast"
+            "claude-opus-4.5"
+          )
+
+          echo "## Enterprise Model Enablement Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Model | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+
+          for model in "${MODELS[@]}"; do
+            echo "Enabling enterprise model: $model"
+            RESULT=$(gh api --method PUT \
+              /enterprises/${{ inputs.enterprise }}/copilot/policies/models/"$model" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -f state=enabled 2>&1)
+            if [ $? -eq 0 ]; then
+              echo "✅ $model enabled (enterprise)"
+              echo "| $model | ✅ Enabled |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "⚠️  $model: $RESULT"
+              echo "| $model | ⚠️ Requires manual step (see below) |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          set -e
+
+      # ── 4. Print manual fallback instructions ─────────────────────────────
+      - name: Print manual configuration instructions
+        run: |
+          ENTERPRISE="${{ inputs.enterprise }}"
+          {
+            echo ""
+            echo "## Manual Enterprise Configuration Steps"
+            echo ""
+            echo "If any model shows '⚠️ Requires manual step' above, complete these steps as an enterprise owner:"
+            echo ""
+            echo "### 1. Enable Copilot in the CLI"
+            echo ""
+            echo "Navigate to:  https://github.com/enterprises/${ENTERPRISE}/settings/copilot/policies"
+            echo ""
+            echo "- Find **Copilot in the CLI** and set it to **Enabled**."
+            echo ""
+            echo "### 2. Enable premium models"
+            echo ""
+            echo "Navigate to:  https://github.com/enterprises/${ENTERPRISE}/settings/copilot/policies"
+            echo ""
+            echo "Enable each of the following models:"
+            echo "- **GPT-5.4**"
+            echo "- **GPT-5.1**"
+            echo "- **Claude Sonnet 4.6**"
+            echo "- **Claude Sonnet 4.5**"
+            echo "- **Claude Opus 4.7**"
+            echo "- **Claude Opus 4.6**"
+            echo "- **Claude Opus 4.6-fast**"
+            echo "- **Claude Opus 4.5**"
+            echo ""
+            echo "After saving, all organizations under the enterprise will inherit these policies"
+            echo "and users will see these models as **Available** in Copilot CLI."
+          } >> "$GITHUB_STEP_SUMMARY"
